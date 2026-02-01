@@ -85,7 +85,7 @@
   
   "ml_filter": {
     "_description": "ML model decides which TPU setups to take and risk sizing",
-    "enabled": false,
+    "enabled": true,
     "model_path": "./models/trade_filter.pkl",
     "model_type": "xgboost",
     

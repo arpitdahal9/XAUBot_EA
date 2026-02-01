@@ -132,6 +132,25 @@ DEFAULT_SPECS: Dict[str, SymbolSpec] = {
         pip_value_per_lot=6.7,
         digits=3
     ),
+    # GBP/JPY (JPY cross - pip size 0.01)
+    "GBP/JPY": SymbolSpec(
+        symbol="GBP/JPY",
+        tick_size=0.001,
+        tick_value_per_lot=0.67,
+        contract_size=100000,
+        pip_size=0.01,
+        pip_value_per_lot=6.7,
+        digits=3
+    ),
+    "GBPJPY": SymbolSpec(
+        symbol="GBPJPY",
+        tick_size=0.001,
+        tick_value_per_lot=0.67,
+        contract_size=100000,
+        pip_size=0.01,
+        pip_value_per_lot=6.7,
+        digits=3
+    ),
     # USD/CAD
     "USD/CAD": SymbolSpec(
         symbol="USD/CAD",
