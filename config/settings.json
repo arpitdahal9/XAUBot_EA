@@ -89,10 +89,11 @@
     "model_path": "./models/trade_filter.pkl",
     "model_type": "xgboost",
     
-    "_comment_trade_gate": "Trade Gate - minimum P(win) to execute",
+    "_comment_trade_gate": "Trade Gate - threshold optimized for expectancy",
     "probability_threshold": 0.58,
+    "dead_zone": 0.02,
     
-    "_comment_risk_scaling": "Dynamic Risk Scaling based on P(win)",
+    "_comment_risk_scaling": "Sigmoid risk scaling with caps",
     "base_risk_percent": 0.75,
     "min_risk_multiplier": 0.5,
     "max_risk_multiplier": 1.5,
@@ -101,9 +102,9 @@
     "train_window_months": 24,
     "test_window_months": 6,
     "embargo_hours": 24,
-    "min_train_samples": 50,
+    "min_train_samples": 200,
     
-    "_comment_calibration": "Calibration Requirements",
+    "_comment_quality": "Auto-disable if model fails these checks",
     "max_calibration_error": 0.10,
     "min_auc": 0.55
   },
@@ -111,11 +112,10 @@
   "_comment_news_filter": "=== NEWS FILTER (Backtest Only) ===",
   
   "news_filter": {
-    "_description": "Skip trades around major news in backtests ONLY",
+    "_description": "Skip trades around major news in backtests ONLY - requires CSV calendar",
     "enabled_in_backtest": true,
     "avoidance_minutes": 30,
-    "events": ["CPI", "NFP", "FOMC"],
-    "custom_calendar_path": "./data/news_calendar.csv"
+    "calendar_path": "./data/news_calendar.csv"
   },
   "risk_management": {
     "account_balance": 10000,

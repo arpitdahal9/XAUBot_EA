@@ -1,209 +1,239 @@
-"""
-Walk-Forward ML Training Pipeline
+﻿"""
+Walk-Forward ML Training Pipeline (Institutional Grade)
 
-Implements institutional-grade ML training:
-1. Walk-forward validation (no single backtest)
-2. Leakage prevention (purged splits, embargo)
-3. Probability calibration
-4. Fold-by-fold metrics
-
-This ensures ML results are realistic and not overfit.
+Features:
+- Proper dataset construction from backtest trades
+- Walk-forward validation with embargo windows
+- Threshold optimization for expectancy (not accuracy)
+- Probability calibration with safeguards
+- Brier score and calibration error metrics
 """
 
 import os
 import csv
+import pickle
 import logging
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime, timedelta
 import numpy as np
 
-from .ml_features import MLFeatures, MLFeatureExtractor
+logger = logging.getLogger(__name__)
 
 
 @dataclass
-class WalkForwardFold:
+class TrainingRow:
+    """Single row in ML training dataset."""
+    timestamp: datetime
+    pair: str
+    direction: str
+    entry_price: float
+    stop_loss: float
+    features: Dict[str, float]
+    label: int  # 1=TP1 hit, 0=SL hit
+    pnl: float = 0.0
+    trade_id: str = ""
+
+
+@dataclass
+class FoldResult:
     """Results from one walk-forward fold."""
     fold_number: int
     train_start: datetime
     train_end: datetime
     test_start: datetime
     test_end: datetime
-    
-    # Training metrics
-    train_samples: int = 0
-    train_wins: int = 0
-    train_losses: int = 0
-    
-    # Test metrics
-    test_samples: int = 0
-    test_wins: int = 0
-    test_losses: int = 0
-    
-    # Performance
-    test_accuracy: float = 0.0
-    test_precision: float = 0.0
-    test_recall: float = 0.0
-    test_auc: float = 0.0
-    test_profit_factor: float = 0.0
-    test_sharpe: float = 0.0
-    
-    # Calibration
-    avg_predicted_prob: float = 0.0
-    actual_win_rate: float = 0.0
-    calibration_error: float = 0.0  # |predicted - actual|
+    train_samples: int
+    test_samples: int
+    auc: float = 0.5
+    brier_score: float = 0.25
+    calibration_error: float = 0.1
+    precision: float = 0.0
+    recall: float = 0.0
+    optimal_threshold: float = 0.58
+    expected_value_at_threshold: float = 0.0
+    trades_passed: int = 0
+    trades_total: int = 0
 
 
 @dataclass
 class WalkForwardResult:
-    """Complete walk-forward validation results."""
-    folds: List[WalkForwardFold] = field(default_factory=list)
+    folds: List[FoldResult] = field(default_factory=list)
+    overall_auc: float = 0.5
+    overall_brier: float = 0.25
+    overall_calibration_error: float = 0.1
+    auc_stability: float = 0.0
+    recommended_threshold: float = 0.58
+    model_valid: bool = False
+
+
+class MLDatasetBuilder:
+    """Build ML training dataset from backtest trades."""
     
-    # Aggregate metrics
-    overall_accuracy: float = 0.0
-    overall_auc: float = 0.0
-    overall_profit_factor: float = 0.0
-    overall_sharpe: float = 0.0
-    overall_calibration_error: float = 0.0
+    def __init__(self):
+        self.rows: List[TrainingRow] = []
     
-    # Stability metrics
-    auc_stability: float = 0.0  # Std dev across folds
-    pf_stability: float = 0.0
+    def load_from_csv(self, csv_path: str) -> int:
+        """
+        Load training data from backtest CSV.
+        
+        Label definition:
+        - y=1 if TP1 was hit before SL (tp1_closed_lots > 0)
+        - y=0 if SL was hit before TP1
+        """
+        if not os.path.exists(csv_path):
+            logger.error(f"CSV not found: {csv_path}")
+            return 0
+        
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            
+            for row in reader:
+                # Only use FINAL rows
+                if row.get('row_type') != 'FINAL':
+                    continue
+                
+                try:
+                    # Parse timestamp
+                    ts_str = row.get('entry_time', '')
+                    try:
+                        timestamp = datetime.fromisoformat(ts_str.replace('Z', ''))
+                    except:
+                        continue
+                    
+                    # Determine label
+                    tp1_closed = float(row.get('tp1_closed_lots', 0) or 0)
+                    exit_reason = row.get('exit_reason', '')
+                    label = 1 if (tp1_closed > 0 or 'TP1' in exit_reason) else 0
+                    
+                    # Extract features available in CSV
+                    features = self._extract_csv_features(row, timestamp)
+                    
+                    training_row = TrainingRow(
+                        timestamp=timestamp,
+                        pair=row.get('pair', 'EUR/USD'),
+                        direction=row.get('side', 'BUY'),
+                        entry_price=float(row.get('entry_price', 0) or 0),
+                        stop_loss=float(row.get('stop_loss', 0) or 0),
+                        features=features,
+                        label=label,
+                        pnl=float(row.get('pnl_total_trade', 0) or 0),
+                        trade_id=row.get('trade_id', '')
+                    )
+                    self.rows.append(training_row)
+                    
+                except Exception as e:
+                    logger.debug(f"Skipping row: {e}")
+                    continue
+        
+        logger.info(f"Loaded {len(self.rows)} training rows from {csv_path}")
+        win_count = sum(1 for r in self.rows if r.label == 1)
+        logger.info(f"  Win rate: {100*win_count/len(self.rows):.1f}%")
+        return len(self.rows)
     
-    # Trade counts
-    total_trades: int = 0
-    trades_passed_filter: int = 0
-    trades_rejected: int = 0
+    def _extract_csv_features(self, row: dict, timestamp: datetime) -> Dict[str, float]:
+        """Extract features from CSV row at ENTRY TIME only."""
+        hour = timestamp.hour
+        
+        return {
+            'tpu_confidence': float(row.get('tpu_confidence', 0.75) or 0.75),
+            'tda_alignment_score': self._parse_alignment(row.get('tda_alignment', 'GOOD')),
+            'fib_distance_normalized': float(row.get('fib_distance_pips', 10) or 10) / 20.0,
+            'has_divergence': 1 if row.get('divergence_type') else 0,
+            'has_pattern': 1 if row.get('pattern_type') else 0,
+            'hour_normalized': hour / 24.0,
+            'day_normalized': timestamp.weekday() / 7.0,
+            'is_london': 1.0 if 8 <= hour < 16 else 0.0,
+            'is_ny': 1.0 if 13 <= hour < 21 else 0.0,
+            'is_overlap': 1.0 if 13 <= hour < 16 else 0.0,
+            'stop_distance_normalized': min(
+                abs(float(row.get('entry_price', 0) or 0) - float(row.get('stop_loss', 0) or 0)) * 10000 / 50, 
+                2.0
+            ),
+        }
+    
+    def _parse_alignment(self, alignment: str) -> float:
+        mapping = {'PERFECT': 1.0, 'GOOD': 0.5, 'WEAK': 0.0}
+        return mapping.get(str(alignment).upper(), 0.0)
+    
+    def get_arrays(self) -> Tuple[np.ndarray, np.ndarray, List[datetime]]:
+        """Get feature array, labels, and timestamps."""
+        if not self.rows:
+            return np.array([]), np.array([]), []
+        
+        # Sort by timestamp
+        self.rows.sort(key=lambda r: r.timestamp)
+        
+        X = []
+        y = []
+        timestamps = []
+        
+        for row in self.rows:
+            X.append(list(row.features.values()))
+            y.append(row.label)
+            timestamps.append(row.timestamp)
+        
+        return np.array(X, dtype=np.float32), np.array(y), timestamps
+    
+    def get_feature_names(self) -> List[str]:
+        if self.rows:
+            return list(self.rows[0].features.keys())
+        return []
 
 
 class WalkForwardTrainer:
     """
-    Walk-Forward ML Training Pipeline.
+    Walk-forward ML training with threshold optimization.
     
-    Implements:
-    1. Rolling window training/testing
-    2. Purged cross-validation (no overlapping trades)
-    3. Embargo period after each trade
-    4. Probability calibration checks
+    Features:
+    - Rolling train/test windows with embargo
+    - Threshold optimization for expectancy (not accuracy)
+    - Probability calibration and safeguards
+    - Auto-disable if model fails quality checks
     """
     
     def __init__(
         self,
-        train_window_months: int = 24,
-        test_window_months: int = 6,
+        train_months: int = 24,
+        test_months: int = 6,
         embargo_hours: int = 24,
-        min_train_samples: int = 50
+        min_samples: int = 50,
+        min_auc: float = 0.55,
+        max_calibration_error: float = 0.10
     ):
-        """
-        Initialize Walk-Forward Trainer.
-        
-        Args:
-            train_window_months: Training window size (default 24 months)
-            test_window_months: Testing window size (default 6 months)
-            embargo_hours: Hours to skip after each trade (default 24)
-            min_train_samples: Minimum training samples per fold
-        """
-        self.logger = logging.getLogger(__name__)
-        
-        self.train_window_months = train_window_months
-        self.test_window_months = test_window_months
+        self.train_months = train_months
+        self.test_months = test_months
         self.embargo_hours = embargo_hours
-        self.min_train_samples = min_train_samples
+        self.min_samples = min_samples
+        self.min_auc = min_auc
+        self.max_calibration_error = max_calibration_error
     
-    def create_dataset_from_trades(
+    def run(
         self,
-        trades_csv_path: str
-    ) -> Tuple[List[Dict], List[int]]:
+        X: np.ndarray,
+        y: np.ndarray,
+        timestamps: List[datetime],
+        model_type: str = 'xgboost'
+    ) -> Tuple[WalkForwardResult, Any, Any]:
         """
-        Create ML dataset from backtest trades CSV.
+        Run walk-forward validation.
         
-        Label assignment:
-        - 1 = Trade reached TP1 (exit_reason contains "TP1" or had partial TP1)
-        - 0 = Trade hit stop loss first
-        
-        Args:
-            trades_csv_path: Path to backtest trades CSV
-            
-        Returns:
-            (features_list, labels_list)
+        Returns (result, trained_model, scaler)
         """
-        self.logger.info(f"[WF_TRAINER] Loading trades from {trades_csv_path}")
+        if len(y) < self.min_samples:
+            logger.warning(f"Insufficient samples: {len(y)} < {self.min_samples}")
+            return WalkForwardResult(), None, None
         
-        features_list = []
-        labels = []
+        start_date = min(timestamps)
+        end_date = max(timestamps)
         
-        with open(trades_csv_path, 'r') as f:
-            reader = csv.DictReader(f)
-            
-            for row in reader:
-                # Only use FINAL rows (one per trade)
-                if row.get('row_type') != 'FINAL':
-                    continue
-                
-                # Determine label
-                exit_reason = row.get('exit_reason', '')
-                tp1_closed = float(row.get('tp1_closed_lots', 0))
-                
-                # Win if TP1 was hit at any point
-                label = 1 if (tp1_closed > 0 or 'TP1' in exit_reason) else 0
-                
-                # Extract features from row
-                try:
-                    features = {
-                        'timestamp': row.get('entry_time', ''),
-                        'pair': row.get('pair', ''),
-                        'direction': row.get('side', ''),
-                        'entry_price': float(row.get('entry_price', 0)),
-                        'stop_loss': float(row.get('stop_loss', 0)),
-                        'tpu_confidence': float(row.get('tpu_confidence', 0.75)) if 'tpu_confidence' in row else 0.75,
-                        'label': label,
-                        # Add more features as available in CSV
-                    }
-                    features_list.append(features)
-                    labels.append(label)
-                except (ValueError, KeyError) as e:
-                    continue
+        result = WalkForwardResult()
+        all_thresholds = []
         
-        self.logger.info(f"[WF_TRAINER] Loaded {len(labels)} trades: {sum(labels)} wins, {len(labels)-sum(labels)} losses")
-        return features_list, labels
-    
-    def create_folds(
-        self,
-        features_list: List[Dict],
-        start_date: datetime,
-        end_date: datetime
-    ) -> List[Tuple[List[int], List[int]]]:
-        """
-        Create walk-forward folds with purging and embargo.
+        train_days = self.train_months * 30
+        test_days = self.test_months * 30
+        embargo = timedelta(hours=self.embargo_hours)
         
-        Args:
-            features_list: List of feature dictionaries with 'timestamp'
-            start_date: Dataset start date
-            end_date: Dataset end date
-            
-        Returns:
-            List of (train_indices, test_indices) tuples
-        """
-        folds = []
-        
-        train_days = self.train_window_months * 30
-        test_days = self.test_window_months * 30
-        
-        # Parse timestamps
-        for i, feat in enumerate(features_list):
-            ts = feat.get('timestamp', '')
-            if isinstance(ts, str) and ts:
-                try:
-                    feat['_datetime'] = datetime.fromisoformat(ts.replace('Z', ''))
-                except:
-                    feat['_datetime'] = start_date
-            elif isinstance(ts, datetime):
-                feat['_datetime'] = ts
-            else:
-                feat['_datetime'] = start_date
-            feat['_index'] = i
-        
-        # Generate folds
         current_start = start_date
         fold_num = 0
         
@@ -211,223 +241,183 @@ class WalkForwardTrainer:
             train_end = current_start + timedelta(days=train_days)
             test_end = train_end + timedelta(days=test_days)
             
-            # Apply embargo: skip trades within embargo_hours of boundary
-            embargo_delta = timedelta(hours=self.embargo_hours)
+            # Get indices with embargo
+            train_idx = [i for i, t in enumerate(timestamps) if current_start <= t < (train_end - embargo)]
+            test_idx = [i for i, t in enumerate(timestamps) if (train_end + embargo) <= t < test_end]
             
-            train_indices = []
-            test_indices = []
+            if len(train_idx) < 30 or len(test_idx) < 5:
+                current_start += timedelta(days=test_days)
+                continue
             
-            for feat in features_list:
-                ts = feat['_datetime']
-                idx = feat['_index']
-                
-                # Training: before train_end minus embargo
-                if current_start <= ts < (train_end - embargo_delta):
-                    train_indices.append(idx)
-                
-                # Testing: after train_end plus embargo
-                elif (train_end + embargo_delta) <= ts < test_end:
-                    test_indices.append(idx)
-            
-            if len(train_indices) >= self.min_train_samples and len(test_indices) >= 5:
-                folds.append((train_indices, test_indices))
-                self.logger.info(
-                    f"[WF_TRAINER] Fold {fold_num}: "
-                    f"Train {len(train_indices)} samples, Test {len(test_indices)} samples"
-                )
-                fold_num += 1
-            
-            # Roll forward by test window
-            current_start += timedelta(days=test_days)
-        
-        self.logger.info(f"[WF_TRAINER] Created {len(folds)} walk-forward folds")
-        return folds
-    
-    def run_walk_forward(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        folds: List[Tuple[List[int], List[int]]],
-        feature_names: List[str],
-        model_type: str = "xgboost"
-    ) -> WalkForwardResult:
-        """
-        Run complete walk-forward validation.
-        
-        Args:
-            X: Feature matrix
-            y: Labels
-            folds: List of (train_idx, test_idx) tuples
-            feature_names: Feature names
-            model_type: "logistic" or "xgboost"
-            
-        Returns:
-            WalkForwardResult with all metrics
-        """
-        from .ml_filter import MLModelTrainer
-        
-        self.logger.info(f"[WF_TRAINER] Running walk-forward with {len(folds)} folds...")
-        
-        trainer = MLModelTrainer()
-        result = WalkForwardResult()
-        
-        all_aucs = []
-        all_pfs = []
-        all_calibration_errors = []
-        
-        for fold_num, (train_idx, test_idx) in enumerate(folds):
-            self.logger.info(f"[WF_TRAINER] Processing fold {fold_num + 1}/{len(folds)}")
-            
-            # Split data
-            X_train = X[train_idx]
-            y_train = y[train_idx]
-            X_test = X[test_idx]
-            y_test = y[test_idx]
+            X_train, y_train = X[train_idx], y[train_idx]
+            X_test, y_test = X[test_idx], y[test_idx]
             
             # Train model
-            if model_type == "xgboost":
-                train_result = trainer.train_xgboost(X_train, y_train, feature_names)
-            else:
-                train_result = trainer.train_logistic(X_train, y_train, feature_names)
+            model, scaler = self._train_model(X_train, y_train, model_type)
             
-            model = train_result['model']
-            scaler = train_result['scaler']
-            
-            # Test predictions
+            # Test
             X_test_scaled = scaler.transform(X_test)
             y_pred_proba = model.predict_proba(X_test_scaled)[:, 1]
-            y_pred = (y_pred_proba >= 0.58).astype(int)
+            
+            # Find optimal threshold
+            optimal_thresh, ev = self._optimize_threshold(y_test, y_pred_proba)
+            all_thresholds.append(optimal_thresh)
             
             # Calculate metrics
-            fold_result = WalkForwardFold(
-                fold_number=fold_num + 1,
-                train_start=datetime.now(),  # Placeholder
-                train_end=datetime.now(),
-                test_start=datetime.now(),
-                test_end=datetime.now(),
-                train_samples=len(train_idx),
-                train_wins=int(sum(y_train)),
-                train_losses=len(y_train) - int(sum(y_train)),
-                test_samples=len(test_idx),
-                test_wins=int(sum(y_test)),
-                test_losses=len(y_test) - int(sum(y_test))
+            fold_result = self._calculate_fold_metrics(
+                fold_num, current_start, train_end, test_end,
+                len(train_idx), len(test_idx),
+                y_test, y_pred_proba, optimal_thresh, ev
             )
-            
-            # Accuracy, precision, recall
-            from sklearn.metrics import accuracy_score, precision_score, recall_score, roc_auc_score
-            
-            fold_result.test_accuracy = accuracy_score(y_test, y_pred)
-            fold_result.test_precision = precision_score(y_test, y_pred, zero_division=0)
-            fold_result.test_recall = recall_score(y_test, y_pred, zero_division=0)
-            
-            try:
-                fold_result.test_auc = roc_auc_score(y_test, y_pred_proba)
-            except:
-                fold_result.test_auc = 0.5
-            
-            # Calibration
-            fold_result.avg_predicted_prob = float(np.mean(y_pred_proba))
-            fold_result.actual_win_rate = float(np.mean(y_test))
-            fold_result.calibration_error = abs(fold_result.avg_predicted_prob - fold_result.actual_win_rate)
-            
-            # Profit factor (approximate from predictions)
-            # Assume 2R wins, 1R losses
-            wins_captured = sum((y_pred == 1) & (y_test == 1))
-            losses_captured = sum((y_pred == 1) & (y_test == 0))
-            
-            if losses_captured > 0:
-                fold_result.test_profit_factor = (wins_captured * 2) / losses_captured
-            else:
-                fold_result.test_profit_factor = float('inf') if wins_captured > 0 else 0
-            
             result.folds.append(fold_result)
-            all_aucs.append(fold_result.test_auc)
-            all_pfs.append(fold_result.test_profit_factor if fold_result.test_profit_factor != float('inf') else 3.0)
-            all_calibration_errors.append(fold_result.calibration_error)
             
-            self.logger.info(
-                f"  Fold {fold_num + 1}: AUC={fold_result.test_auc:.3f}, "
-                f"PF={fold_result.test_profit_factor:.2f}, "
-                f"Cal.Err={fold_result.calibration_error:.3f}"
+            logger.info(f"Fold {fold_num}: AUC={fold_result.auc:.3f}, Thresh={optimal_thresh:.2f}, EV={ev:.3f}")
+            
+            fold_num += 1
+            current_start += timedelta(days=test_days)
+        
+        # Aggregate results
+        if result.folds:
+            result.overall_auc = np.mean([f.auc for f in result.folds])
+            result.overall_brier = np.mean([f.brier_score for f in result.folds])
+            result.overall_calibration_error = np.mean([f.calibration_error for f in result.folds])
+            result.auc_stability = np.std([f.auc for f in result.folds])
+            result.recommended_threshold = np.median(all_thresholds) if all_thresholds else 0.58
+            
+            # Validate model quality
+            result.model_valid = (
+                result.overall_auc >= self.min_auc and
+                result.overall_calibration_error <= self.max_calibration_error
             )
         
-        # Aggregate metrics
-        result.overall_auc = np.mean(all_aucs)
-        result.overall_profit_factor = np.mean(all_pfs)
-        result.overall_calibration_error = np.mean(all_calibration_errors)
-        result.auc_stability = np.std(all_aucs)
-        result.pf_stability = np.std(all_pfs)
+        # Train final model on all data
+        final_model, final_scaler = self._train_model(X, y, model_type)
         
-        result.total_trades = sum(f.test_samples for f in result.folds)
-        
-        self.logger.info(f"\n[WF_TRAINER] Walk-Forward Complete:")
-        self.logger.info(f"  Overall AUC: {result.overall_auc:.3f} ± {result.auc_stability:.3f}")
-        self.logger.info(f"  Overall PF: {result.overall_profit_factor:.2f} ± {result.pf_stability:.2f}")
-        self.logger.info(f"  Calibration Error: {result.overall_calibration_error:.3f}")
-        
-        return result
+        return result, final_model, final_scaler
     
-    def generate_calibration_curve(
-        self,
-        y_true: np.ndarray,
-        y_pred_proba: np.ndarray,
-        n_bins: int = 10
-    ) -> Dict:
-        """
-        Generate calibration curve data.
+    def _train_model(self, X: np.ndarray, y: np.ndarray, model_type: str):
+        """Train a single model."""
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.calibration import CalibratedClassifierCV
         
-        Args:
-            y_true: True labels
-            y_pred_proba: Predicted probabilities
-            n_bins: Number of bins
-            
-        Returns:
-            Dict with bin data for plotting
-        """
-        bins = np.linspace(0, 1, n_bins + 1)
-        bin_centers = []
-        actual_rates = []
-        counts = []
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
         
-        for i in range(n_bins):
-            mask = (y_pred_proba >= bins[i]) & (y_pred_proba < bins[i + 1])
-            if sum(mask) > 0:
-                bin_centers.append((bins[i] + bins[i + 1]) / 2)
-                actual_rates.append(y_true[mask].mean())
-                counts.append(sum(mask))
+        if model_type == 'xgboost':
+            try:
+                import xgboost as xgb
+                n_pos = sum(y)
+                n_neg = len(y) - n_pos
+                scale_pos_weight = n_neg / max(n_pos, 1)
+                base_model = xgb.XGBClassifier(
+                    n_estimators=100, max_depth=4, learning_rate=0.1,
+                    scale_pos_weight=scale_pos_weight, random_state=42, eval_metric='auc'
+                )
+            except ImportError:
+                from sklearn.linear_model import LogisticRegression
+                base_model = LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42)
+        else:
+            from sklearn.linear_model import LogisticRegression
+            base_model = LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42)
         
-        return {
-            'bin_centers': bin_centers,
-            'actual_rates': actual_rates,
-            'counts': counts,
-            'perfect_line': [0, 1]
-        }
+        base_model.fit(X_scaled, y)
+        
+        # Calibrate probabilities (isotonic)
+        calibrated = CalibratedClassifierCV(base_model, cv=min(5, len(y)//10), method='isotonic')
+        calibrated.fit(X_scaled, y)
+        
+        return calibrated, scaler
     
-    def save_results(self, result: WalkForwardResult, path: str) -> None:
-        """Save walk-forward results to CSV."""
-        with open(path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                'fold', 'train_samples', 'test_samples', 'train_wins', 'test_wins',
-                'accuracy', 'precision', 'recall', 'auc', 'profit_factor',
-                'avg_pred_prob', 'actual_win_rate', 'calibration_error'
-            ])
-            
-            for fold in result.folds:
-                writer.writerow([
-                    fold.fold_number, fold.train_samples, fold.test_samples,
-                    fold.train_wins, fold.test_wins, f"{fold.test_accuracy:.3f}",
-                    f"{fold.test_precision:.3f}", f"{fold.test_recall:.3f}",
-                    f"{fold.test_auc:.3f}", f"{fold.test_profit_factor:.2f}",
-                    f"{fold.avg_predicted_prob:.3f}", f"{fold.actual_win_rate:.3f}",
-                    f"{fold.calibration_error:.3f}"
-                ])
-            
-            # Summary row
-            writer.writerow([])
-            writer.writerow(['OVERALL', '', result.total_trades, '', '',
-                             '', '', '', f"{result.overall_auc:.3f}",
-                             f"{result.overall_profit_factor:.2f}", '', '',
-                             f"{result.overall_calibration_error:.3f}"])
+    def _optimize_threshold(self, y_true: np.ndarray, y_pred_proba: np.ndarray) -> Tuple[float, float]:
+        """
+        Find threshold that maximizes expected value.
         
-        self.logger.info(f"[WF_TRAINER] Results saved to {path}")
+        Uses Model A payoff structure: Win = +2R (TP1), Loss = -1R
+        """
+        best_thresh = 0.58
+        best_ev = -999
+        
+        for thresh in np.arange(0.50, 0.76, 0.02):
+            # Trades that would pass this threshold
+            mask = y_pred_proba >= thresh
+            if sum(mask) < 3:
+                continue
+            
+            wins = sum((y_true == 1) & mask)
+            losses = sum((y_true == 0) & mask)
+            total = wins + losses
+            
+            if total == 0:
+                continue
+            
+            # Expected value per trade (Model A: +2R win, -1R loss)
+            ev = (wins * 2 - losses * 1) / total
+            
+            if ev > best_ev:
+                best_ev = ev
+                best_thresh = thresh
+        
+        return best_thresh, best_ev
+    
+    def _calculate_fold_metrics(
+        self, fold_num, train_start, train_end, test_end,
+        train_samples, test_samples, y_true, y_pred_proba, threshold, ev
+    ) -> FoldResult:
+        """Calculate all metrics for a fold."""
+        from sklearn.metrics import roc_auc_score, brier_score_loss, precision_score, recall_score
+        
+        y_pred = (y_pred_proba >= threshold).astype(int)
+        
+        try:
+            auc = roc_auc_score(y_true, y_pred_proba)
+        except:
+            auc = 0.5
+        
+        brier = brier_score_loss(y_true, y_pred_proba)
+        calibration_error = abs(np.mean(y_pred_proba) - np.mean(y_true))
+        
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall = recall_score(y_true, y_pred, zero_division=0)
+        
+        return FoldResult(
+            fold_number=fold_num,
+            train_start=train_start,
+            train_end=train_end,
+            test_start=train_end,
+            test_end=test_end,
+            train_samples=train_samples,
+            test_samples=test_samples,
+            auc=auc,
+            brier_score=brier,
+            calibration_error=calibration_error,
+            precision=precision,
+            recall=recall,
+            optimal_threshold=threshold,
+            expected_value_at_threshold=ev,
+            trades_passed=sum(y_pred),
+            trades_total=len(y_true)
+        )
+
+
+def save_model_artifact(model, scaler, result: WalkForwardResult, feature_names: List[str], path: str):
+    """Save trained model with metadata."""
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    
+    artifact = {
+        'model': model,
+        'scaler': scaler,
+        'model_type': 'xgboost',
+        'version': datetime.now().strftime('%Y%m%d_%H%M'),
+        'feature_names': feature_names,
+        'threshold': result.recommended_threshold,
+        'overall_auc': result.overall_auc,
+        'overall_calibration_error': result.overall_calibration_error,
+        'model_valid': result.model_valid,
+        'created_at': datetime.now().isoformat()
+    }
+    
+    with open(path, 'wb') as f:
+        pickle.dump(artifact, f)
+    
+    logger.info(f"Model artifact saved to {path}")
+    return artifact
