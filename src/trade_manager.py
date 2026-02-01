@@ -303,40 +303,16 @@ class TradeManager:
         return actions
     
     def _get_pip_value(self, pair: str, lot_size: float) -> float:
-        """
-        Get pip value for a currency pair.
-        
-        For USD account:
-        - EUR/USD, GBP/USD, AUD/USD: $10 per pip per lot
-        - USD/JPY: ~$6.67 per pip per lot (varies with rate)
-        - USD/CAD: ~$7.40 per pip per lot (varies with rate)
-        - XAU/USD (Gold): $10 per pip per lot (1 pip = $0.10 move)
-        
-        Args:
-            pair: Currency pair
-            lot_size: Position size in lots
-            
-        Returns:
-            Pip value in USD for the given lot size
-        """
-        # Base pip values per standard lot (USD account)
-        pip_values = {
-            "EUR/USD": 10.0,
-            "GBP/USD": 10.0,
-            "AUD/USD": 10.0,
-            "NZD/USD": 10.0,
-            "USD/CHF": 10.0,  # Approximate
-            "USD/CAD": 7.40,  # ~10/1.35
-            "USD/JPY": 6.67,  # ~1000/150
-            "XAU/USD": 10.0,  # Gold
-            "XAUUSD": 10.0,   # Gold (alternate symbol)
-        }
-        
-        # Remove slash for lookup
-        pair_key = pair.replace("/", "")
-        base_value = pip_values.get(pair, pip_values.get(pair_key, 10.0))
-        
-        return base_value * lot_size
+        """Get pip value for a currency pair using symbol spec."""
+        from .symbol_spec import get_symbol_spec
+        spec = get_symbol_spec(pair)
+        return spec.pip_value_per_lot * lot_size
+    
+    def _get_pip_size(self, pair: str) -> float:
+        """Get pip size for a currency pair using symbol spec."""
+        from .symbol_spec import get_symbol_spec
+        spec = get_symbol_spec(pair)
+        return spec.pip_size
     
     def _handle_entry_filled(self, trade: ManagedTrade, price: float, r_mult: float) -> List[dict]:
         """Handle ENTRY_FILLED state."""
@@ -378,12 +354,12 @@ class TradeManager:
                 logger.info(f"[TRADE_MGR] {trade.trade_id}: TP1 SKIPPED (no lots), moving to runner")
                 return actions
             
-            # Calculate P&L for this partial using proper pip value
-            pip_mult = 100 if "JPY" in trade.pair else 10000
+            # Calculate P&L for this partial using symbol spec
+            pip_size = self._get_pip_size(trade.pair)
             if trade.side == OrderSide.BUY:
-                pips = (price - trade.entry_price) * pip_mult
+                pips = (price - trade.entry_price) / pip_size
             else:
-                pips = (trade.entry_price - price) * pip_mult
+                pips = (trade.entry_price - price) / pip_size
             
             pip_value = self._get_pip_value(trade.pair, close_lots)
             pnl = pips * pip_value
@@ -452,12 +428,12 @@ class TradeManager:
                 logger.info(f"[TRADE_MGR] {trade.trade_id}: TP2 SKIPPED (no lots), runner continues")
                 return actions
             
-            # Calculate P&L using proper pip value
-            pip_mult = 100 if "JPY" in trade.pair else 10000
+            # Calculate P&L using symbol spec
+            pip_size = self._get_pip_size(trade.pair)
             if trade.side == OrderSide.BUY:
-                pips = (price - trade.entry_price) * pip_mult
+                pips = (price - trade.entry_price) / pip_size
             else:
-                pips = (trade.entry_price - price) * pip_mult
+                pips = (trade.entry_price - price) / pip_size
             
             pip_value = self._get_pip_value(trade.pair, close_lots)
             pnl = pips * pip_value
@@ -541,12 +517,12 @@ class TradeManager:
                 stopped = True
         
         if stopped:
-            # Calculate final P&L using proper pip value
-            pip_mult = 100 if "JPY" in trade.pair else 10000
+            # Calculate final P&L using symbol spec
+            pip_size = self._get_pip_size(trade.pair)
             if trade.side == OrderSide.BUY:
-                pips = (current_price - trade.entry_price) * pip_mult
+                pips = (current_price - trade.entry_price) / pip_size
             else:
-                pips = (trade.entry_price - current_price) * pip_mult
+                pips = (trade.entry_price - current_price) / pip_size
             
             pip_value = self._get_pip_value(trade.pair, trade.remaining_lot_size)
             final_pnl = pips * pip_value
@@ -595,12 +571,12 @@ class TradeManager:
         
         trade = self.active_trades[trade_id]
         
-        # Calculate final P&L using proper pip value
-        pip_mult = 100 if "JPY" in trade.pair else 10000
+        # Calculate final P&L using symbol spec
+        pip_size = self._get_pip_size(trade.pair)
         if trade.side == OrderSide.BUY:
-            pips = (exit_price - trade.entry_price) * pip_mult
+            pips = (exit_price - trade.entry_price) / pip_size
         else:
-            pips = (trade.entry_price - exit_price) * pip_mult
+            pips = (trade.entry_price - exit_price) / pip_size
         
         pip_value = self._get_pip_value(trade.pair, trade.remaining_lot_size)
         final_pnl = pips * pip_value

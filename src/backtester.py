@@ -428,8 +428,11 @@ class Backtester:
         self._managed_trades = {}
         self._trade_counter = 0
         
-        # Get pip size
-        pip_size = 0.01 if "JPY" in pair else 0.0001
+        # Get pip size from symbol spec
+        from .symbol_spec import get_symbol_spec
+        symbol_spec = get_symbol_spec(pair)
+        pip_size = symbol_spec.pip_size
+        self.logger.info(f"[BACKTEST] Using symbol spec for {pair}: pip_size={pip_size}, pip_value=${symbol_spec.pip_value_per_lot}/lot")
         
         # Initialize risk manager
         risk_manager = RiskManager(self.config.risk_management)
@@ -870,14 +873,15 @@ class Backtester:
         if exit_price is None:
             exit_price = candle.close
         
-        pip_size = 0.01 if "JPY" in pos.pair else 0.0001
+        from .symbol_spec import get_symbol_spec
+        spec = get_symbol_spec(pos.pair)
         
         if pos.side == OrderSide.BUY:
-            pnl_pips = (exit_price - pos.entry_price) / pip_size
+            pnl_pips = (exit_price - pos.entry_price) / spec.pip_size
         else:
-            pnl_pips = (pos.entry_price - exit_price) / pip_size
+            pnl_pips = (pos.entry_price - exit_price) / spec.pip_size
         
-        pip_value = self._get_pip_value(pos.pair, pos.lot_size)
+        pip_value = spec.pip_value_per_lot * pos.lot_size
         pnl = pnl_pips * pip_value
         pnl -= self.commission_per_lot * pos.lot_size
         
@@ -896,40 +900,33 @@ class Backtester:
     
     def _update_equity(self, candle: Candle, trade_manager: Optional[TradeManager] = None) -> None:
         """Update current equity with unrealized P&L."""
-        pip_size = 0.01 if "JPY" in candle.pair else 0.0001
+        from .symbol_spec import get_symbol_spec
+        spec = get_symbol_spec(candle.pair)
         unrealized = 0.0
         
         if trade_manager:
             for trade in trade_manager.active_trades.values():
                 if trade.side == OrderSide.BUY:
-                    pips = (candle.close - trade.entry_price) / pip_size
+                    pips = (candle.close - trade.entry_price) / spec.pip_size
                 else:
-                    pips = (trade.entry_price - candle.close) / pip_size
-                pip_value = self._get_pip_value(trade.pair, trade.remaining_lot_size)
+                    pips = (trade.entry_price - candle.close) / spec.pip_size
+                pip_value = spec.pip_value_per_lot * trade.remaining_lot_size
                 unrealized += pips * pip_value
         else:
             for pos in self._open_positions:
                 if pos.side == OrderSide.BUY:
-                    pips = (candle.close - pos.entry_price) / pip_size
+                    pips = (candle.close - pos.entry_price) / spec.pip_size
                 else:
-                    pips = (pos.entry_price - candle.close) / pip_size
-                unrealized += pips * self._get_pip_value(pos.pair, pos.lot_size)
+                    pips = (pos.entry_price - candle.close) / spec.pip_size
+                unrealized += pips * spec.pip_value_per_lot * pos.lot_size
         
         self._equity = self._balance + unrealized
     
     def _get_pip_value(self, pair: str, lot_size: float = 1.0) -> float:
-        """Get pip value for a currency pair."""
-        pip_values = {
-            "EUR/USD": 10.0, "EURUSD": 10.0,
-            "GBP/USD": 10.0, "GBPUSD": 10.0,
-            "AUD/USD": 10.0, "AUDUSD": 10.0,
-            "USD/CAD": 7.4, "USDCAD": 7.4,
-            "USD/JPY": 6.7, "USDJPY": 6.7,
-            "XAU/USD": 10.0, "XAUUSD": 10.0,
-        }
-        pair_clean = pair.upper().replace("/", "")
-        base_value = pip_values.get(pair, pip_values.get(pair_clean, 10.0))
-        return base_value * lot_size
+        """Get pip value for a currency pair using symbol spec."""
+        from .symbol_spec import get_symbol_spec
+        spec = get_symbol_spec(pair)
+        return spec.pip_value_per_lot * lot_size
     
     def _calculate_atr(self, candles: List[Candle], period: int = 14) -> float:
         """Calculate Average True Range."""
