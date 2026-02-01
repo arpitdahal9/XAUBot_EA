@@ -5,9 +5,13 @@ Predicts P(TP1 hit before SL) and uses it for:
 1. Trade gate: Only execute if P(win) >= threshold
 2. Risk scaling: Adjust position size based on probability
 
+NEW: 3-Zone Behavior:
+- Zone A (≥0.60): Take trade at normal risk
+- Zone B (0.55-0.60): Take trade at 0.5x risk (reduced size)
+- Zone C (<0.55): Reject trade
+
 Features:
-- Smooth sigmoid risk scaling (no noise whipsaw)
-- Dead-zone around threshold (stabilizes behavior)
+- 3-zone risk scaling (clearer than sigmoid)
 - Auto-disable on model quality failure
 - Calibrated probability thresholds
 """
@@ -39,21 +43,30 @@ class MLTradeFilter:
     """
     ML-based trade quality filter.
     
-    Improved features:
-    - Sigmoid risk scaling (smoother than linear)
-    - Dead-zone: no risk change if p_win within +/-0.02 of threshold
-    - Auto-disable if model fails quality checks
+    3-Zone Behavior:
+    - Zone A (p >= zone_a_threshold): Take at normal risk (1.0x)
+    - Zone B (zone_b_threshold <= p < zone_a_threshold): Take at reduced risk (0.5x)
+    - Zone C (p < zone_b_threshold): Reject trade
+    
+    Auto-disable if model fails quality checks.
     """
+    
+    # 3-Zone thresholds (configurable)
+    ZONE_A_THRESHOLD = 0.60  # Normal risk zone
+    ZONE_B_THRESHOLD = 0.55  # Reduced risk zone
+    ZONE_B_RISK_MULT = 0.5   # Risk multiplier for Zone B
     
     def __init__(
         self,
         model_path: Optional[str] = None,
-        probability_threshold: float = 0.58,
+        probability_threshold: float = 0.55,  # Lowered: Zone C cutoff
         base_risk_percent: float = 0.75,
         min_risk_multiplier: float = 0.5,
         max_risk_multiplier: float = 1.5,
         dead_zone: float = 0.02,
-        enabled: bool = True
+        enabled: bool = True,
+        zone_a_threshold: float = 0.60,
+        zone_b_threshold: float = 0.55
     ):
         self.probability_threshold = probability_threshold
         self.base_risk_percent = base_risk_percent
@@ -61,6 +74,10 @@ class MLTradeFilter:
         self.max_risk_mult = max_risk_multiplier
         self.dead_zone = dead_zone
         self.enabled = enabled
+        
+        # 3-Zone configuration
+        self.zone_a_threshold = zone_a_threshold
+        self.zone_b_threshold = zone_b_threshold
         
         self._model = None
         self._scaler = None
@@ -117,17 +134,16 @@ class MLTradeFilter:
             p_win = float(proba[1] if len(proba) > 1 else proba[0])
             p_win = np.clip(p_win, 0.0, 1.0)
             
-            # Trade decision
-            should_trade = p_win >= self.probability_threshold
+            # 3-Zone Trade Decision
+            should_trade, risk_mult, zone = self._apply_3zone_logic(p_win)
             
-            # Risk scaling with dead-zone and smooth sigmoid
-            risk_mult = self._calculate_risk_multiplier(p_win)
+            logger.debug(f"ML 3-Zone: p_win={p_win:.2%} -> Zone {zone}, risk={risk_mult}x, trade={should_trade}")
             
             return MLPrediction(
                 probability_win=p_win,
                 should_trade=should_trade,
                 risk_multiplier=risk_mult,
-                threshold_used=self.probability_threshold,
+                threshold_used=self.zone_b_threshold,  # Rejection threshold
                 model_version=self._model_version,
                 model_valid=self._model_valid
             )
@@ -136,40 +152,50 @@ class MLTradeFilter:
             return self._fallback_prediction(features)
     
     def _fallback_prediction(self, features: MLFeatures) -> MLPrediction:
-        """Fallback when model unavailable."""
-        # Use TPU confidence as proxy
+        """Fallback when model unavailable - use TPU confidence for 3-zone."""
+        # Use TPU confidence as proxy for p_win
         p_win = 0.5 + (features.tpu_confidence - 0.5) * 0.3
         p_win = np.clip(p_win, 0.3, 0.7)
         
+        # Apply 3-zone logic even in fallback
+        should_trade, risk_mult, zone = self._apply_3zone_logic(p_win)
+        
         return MLPrediction(
             probability_win=p_win,
-            should_trade=p_win >= self.probability_threshold,
-            risk_multiplier=1.0,  # No scaling in fallback
-            threshold_used=self.probability_threshold,
+            should_trade=should_trade,
+            risk_multiplier=risk_mult,
+            threshold_used=self.zone_b_threshold,
             model_version="fallback",
             model_valid=False
         )
     
+    def _apply_3zone_logic(self, p_win: float) -> Tuple[bool, float, str]:
+        """
+        Apply 3-Zone trading logic.
+        
+        Returns: (should_trade, risk_multiplier, zone_name)
+        
+        Zone A (p >= 0.60): Take at normal risk (1.0x)
+        Zone B (0.55 <= p < 0.60): Take at reduced risk (0.5x)
+        Zone C (p < 0.55): Reject trade
+        """
+        if p_win >= self.zone_a_threshold:
+            # Zone A: High confidence - take at normal risk
+            return True, 1.0, "A"
+        elif p_win >= self.zone_b_threshold:
+            # Zone B: Medium confidence - take at reduced risk
+            return True, self.ZONE_B_RISK_MULT, "B"
+        else:
+            # Zone C: Low confidence - reject
+            return False, 0.0, "C"
+    
     def _calculate_risk_multiplier(self, p_win: float) -> float:
         """
-        Calculate risk multiplier with dead-zone and smooth sigmoid.
-        
-        Dead-zone: If p_win is within +/-0.02 of threshold, return 1.0
-        Sigmoid: Smooth transition instead of linear (reduces noise sensitivity)
+        Calculate risk multiplier using 3-zone logic.
+        (Legacy method for backward compatibility)
         """
-        # Dead-zone check
-        if abs(p_win - self.probability_threshold) <= self.dead_zone:
-            return 1.0
-        
-        # Sigmoid mapping from p_win to risk multiplier
-        # Center at threshold, map [0.5, 0.75] -> [min_mult, max_mult]
-        x = (p_win - 0.5) / 0.25  # Normalize to [-2, 2] range roughly
-        sigmoid = 1 / (1 + np.exp(-2 * x))  # Smoother sigmoid
-        
-        # Map sigmoid output to [min_mult, max_mult]
-        mult = self.min_risk_mult + sigmoid * (self.max_risk_mult - self.min_risk_mult)
-        
-        return float(np.clip(mult, self.min_risk_mult, self.max_risk_mult))
+        _, mult, _ = self._apply_3zone_logic(p_win)
+        return mult
     
     def get_adjusted_risk_percent(self, p_win: float) -> float:
         """Get adjusted risk percentage based on probability."""

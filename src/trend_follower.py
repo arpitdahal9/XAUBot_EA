@@ -235,10 +235,17 @@ class TrendFollower:
             self._require_pattern = pattern_config.get("require_pattern", False)
             
             # FIX #4: Confidence gate (minimum threshold to take a trade)
-            self._min_confidence = 0.75  # Default: 75% minimum
+            self._min_confidence = 0.70  # Default: 70% minimum (lowered from 75%)
             signal_config = raw_config.get("signal_quality", {})
-            self._min_confidence = signal_config.get("min_confidence", 0.75)
-            self._use_sma_fallback = signal_config.get("use_sma_fallback", False)  # Disable SMA fallback by default
+            self._min_confidence = signal_config.get("min_confidence", 0.70)
+            self._use_tpu_lite = signal_config.get("use_tpu_lite", True)  # TPU-lite mode (replaces SMA fallback)
+            
+            # NEW: OR-gating mode (Divergence OR Pattern instead of AND)
+            self._use_or_gating = signal_config.get("use_or_gating", True)
+            
+            # NEW: Multi-fib levels for trend regime
+            self._fib_trend_levels = [0.618, 0.786, 0.886]  # Trend regime
+            self._fib_reversal_level = 0.886  # Reversal regime (strict)
             
         except Exception as e:
             self.logger.warning(f"[TREND] Using default config: {e}")
@@ -257,8 +264,11 @@ class TrendFollower:
             self._pattern_tolerance_pips = 15
             self._require_pattern = False
             # FIX #4: Confidence gate defaults
-            self._min_confidence = 0.75
-            self._use_sma_fallback = False
+            self._min_confidence = 0.70  # Lowered from 0.75
+            self._use_tpu_lite = True  # Replaces SMA fallback
+            self._use_or_gating = True  # Divergence OR Pattern
+            self._fib_trend_levels = [0.618, 0.786, 0.886]
+            self._fib_reversal_level = 0.886
             
             # ML Filter defaults
             self._ml_enabled = False
@@ -346,7 +356,9 @@ class TrendFollower:
         self.logger.info(f"  [ENHANCED] Divergence: {'ON' if self._divergence_enabled else 'OFF'}")
         self.logger.info(f"  [ENHANCED] Patterns: {'ON' if self._patterns_enabled else 'OFF'}")
         self.logger.info(f"  [QUALITY] Min Confidence: {self._min_confidence:.0%}")
-        self.logger.info(f"  [QUALITY] SMA Fallback: {'ON' if self._use_sma_fallback else 'OFF (selective mode)'}")
+        self.logger.info(f"  [QUALITY] Gating: {'OR (Div OR Pat)' if self._use_or_gating else 'AND (Div AND Pat)'}")
+        self.logger.info(f"  [QUALITY] Fib Levels: {self._fib_trend_levels} (trend) / {self._fib_reversal_level} (reversal)")
+        self.logger.info(f"  [QUALITY] TPU-Lite: {'ON' if self._use_tpu_lite else 'OFF'}")
         
         if self._use_partial_exits:
             self.logger.info(f"  Exit Mode: PARTIAL (TradeManager controls TP1/TP2/Runner)")
@@ -487,25 +499,42 @@ class TrendFollower:
                 result.reason = "TDA alignment WEAK - no trade"
                 return result
         
-        # ===== STEP 2: Fibonacci Retracement =====
+        # ===== STEP 2: Fibonacci Retracement (Multi-Level Support) =====
         fib_levels = None
+        fib_level_used = None
         if self._fib_enabled:
             fib_levels = self.fib_calculator.calculate_levels(candles, self._fib_lookback)
             
             if fib_levels:
-                in_zone, distance = self.fib_calculator.is_price_at_entry_zone(
-                    current_price, fib_levels, self._fib_tolerance_pips
-                )
-                result.at_fib_entry = in_zone
-                result.fib_distance_pips = distance
+                # Determine if we're in trend or reversal regime based on TDA
+                is_trend_regime = tda_result and tda_result.alignment == AlignmentQuality.PERFECT
                 
+                # Check multiple fib levels in trend regime, strict 88.6% in reversal
+                fib_levels_to_check = self._fib_trend_levels if is_trend_regime else [self._fib_reversal_level]
+                
+                in_zone = False
+                best_distance = 999
+                for fib_level in fib_levels_to_check:
+                    level_price = fib_levels.get_level_price(fib_level)
+                    if level_price > 0:
+                        pip_mult = 100 if "JPY" in pair else (10 if "XAU" in pair else 10000)
+                        distance = abs(current_price - level_price) * pip_mult
+                        if distance < self._fib_tolerance_pips and distance < best_distance:
+                            in_zone = True
+                            best_distance = distance
+                            fib_level_used = fib_level
+                
+                result.at_fib_entry = in_zone
+                result.fib_distance_pips = best_distance if in_zone else 999
+                
+                regime_str = "TREND" if is_trend_regime else "REVERSAL"
                 self.logger.debug(
-                    f"[TREND] Fib: {'IN ZONE' if in_zone else 'OUT'} "
-                    f"(88.6%={fib_levels.level_886:.5f}, dist={distance:.1f} pips)"
+                    f"[TREND] Fib ({regime_str}): {'IN ZONE' if in_zone else 'OUT'} "
+                    f"(levels={fib_levels_to_check}, best_dist={best_distance:.1f} pips)"
                 )
                 
                 if not in_zone:
-                    result.reason = f"Price not at Fib 88.6% entry zone (dist={distance:.1f} pips)"
+                    result.reason = f"Price not at Fib entry zone (dist={best_distance:.1f} pips)"
                     return result
         
         # ===== STEP 3: Divergence Detection =====
@@ -520,9 +549,6 @@ class TrendFollower:
                     f"[TREND] Divergence: {divergence.type.value} "
                     f"({divergence.strength.value}, conf={divergence.confidence:.2f})"
                 )
-            elif self._require_divergence:
-                result.reason = "No divergence confirmation"
-                return result
         
         # ===== STEP 4: Pattern Recognition =====
         pattern = None
@@ -537,7 +563,20 @@ class TrendFollower:
                     f"[TREND] Pattern: {pattern.pattern_type.value} "
                     f"(conf={pattern.confidence:.2f}, confirmed={pattern.is_confirmed})"
                 )
-            elif self._require_pattern:
+        
+        # ===== NEW: OR-Gating Check =====
+        # Require: TDA >= GOOD + Fib zone + (Divergence OR Pattern)
+        if self._use_or_gating:
+            has_confirmation = result.has_divergence or result.has_pattern
+            if not has_confirmation:
+                result.reason = "No confirmation (need Divergence OR Pattern)"
+                return result
+        else:
+            # Old AND logic: require both if enabled
+            if self._require_divergence and not result.has_divergence:
+                result.reason = "No divergence confirmation"
+                return result
+            if self._require_pattern and not result.has_pattern:
                 result.reason = "No pattern confirmation"
                 return result
         
@@ -908,45 +947,17 @@ class TrendFollower:
                     
                     return signals
         
-        # FIX #4: Optionally disable SMA fallback for quality over quantity
-        if not self._use_sma_fallback:
-            # No SMA fallback - only trade high-quality enhanced setups
-            return signals
+        # ===== TPU-Lite Mode =====
+        # Lighter version: TDA + Fib only (no divergence/pattern required)
+        # Has lower confidence requirement (0.55 minimum)
+        if self._use_tpu_lite and not enhanced.can_trade:
+            tpu_lite_signal = self._run_tpu_lite_analysis(pair, market_data, account_state)
+            if tpu_lite_signal:
+                signals.append(tpu_lite_signal)
+                return signals
         
-        # Fallback to SMA crossover (disabled by default with FIX #4)
-        crossover = self.detect_crossover(pair)
-        strength = self.calculate_signal_strength(pair)
-        
-        if crossover:
-            lot_result = self.risk_manager.calculate_position_size(
-                pair=pair,
-                stop_loss_pips=self.config.stop_loss_pips,
-                account_equity=account_state.equity,
-                free_margin=account_state.free_margin
-            )
-            
-            if lot_result.is_valid:
-                if crossover == "BULLISH":
-                    signal = self._create_entry_signal(
-                        pair=pair,
-                        side=SignalType.BUY,
-                        price=market_data.ask,
-                        lot_size=lot_result.lot_size,
-                        strength=strength,
-                        reason="SMA bullish crossover",
-                        use_partial_exits=self._use_partial_exits
-                    )
-                else:
-                    signal = self._create_entry_signal(
-                        pair=pair,
-                        side=SignalType.SELL,
-                        price=market_data.bid,
-                        lot_size=lot_result.lot_size,
-                        strength=strength,
-                        reason="SMA bearish crossover",
-                        use_partial_exits=self._use_partial_exits
-                    )
-                signals.append(signal)
+        # No more SMA fallback - TPU-lite replaces it
+        return signals
         
         # Check for exit signals
         if pair in self._active_positions:
@@ -972,6 +983,171 @@ class TrendFollower:
         
         return sum(true_ranges) / len(true_ranges) if true_ranges else 0.001
     
+    def _run_tpu_lite_analysis(
+        self,
+        pair: str,
+        market_data: MarketData,
+        account_state: AccountState
+    ) -> Optional[Signal]:
+        """
+        TPU-Lite Mode: Lighter requirements than full TPU.
+        
+        Requirements:
+        - TDA >= GOOD (still required for direction)
+        - In Fib zone (0.5-0.886, wider range)
+        - NO divergence/pattern required
+        - Lower confidence threshold (0.55)
+        
+        This replaces SMA fallback with smarter logic.
+        """
+        current_price = market_data.mid_price
+        candles = list(self._candle_history[pair])
+        
+        if len(candles) < self._fib_lookback + 5:
+            return None
+        
+        # Step 1: TDA check (still required)
+        tda_result = None
+        if self._tda_enabled:
+            weekly = self._candles_weekly.get(pair, candles)
+            daily = self._candles_daily.get(pair, candles)
+            h4 = self._candles_h4.get(pair, candles)
+            h1 = candles[-100:] if len(candles) >= 100 else candles
+            
+            tda_result = self.tda_analyzer.run_tda(weekly, daily, h4, h1)
+            
+            if tda_result.alignment == AlignmentQuality.WEAK:
+                return None  # TDA still required even in lite mode
+        
+        # Step 2: Fib check (wider tolerance for lite mode)
+        fib_levels = self.fib_calculator.calculate_levels(candles, self._fib_lookback)
+        if not fib_levels:
+            return None
+        
+        # TPU-lite uses wider fib levels: 0.5, 0.618, 0.786, 0.886
+        tpu_lite_fib_levels = [0.5, 0.618, 0.786, 0.886]
+        tpu_lite_tolerance = self._fib_tolerance_pips * 1.5  # 50% wider tolerance
+        
+        in_zone = False
+        best_distance = 999
+        fib_level_used = None
+        for fib_level in tpu_lite_fib_levels:
+            level_price = fib_levels.get_level_price(fib_level)
+            if level_price > 0:
+                pip_mult = 100 if "JPY" in pair else (10 if "XAU" in pair else 10000)
+                distance = abs(current_price - level_price) * pip_mult
+                if distance < tpu_lite_tolerance and distance < best_distance:
+                    in_zone = True
+                    best_distance = distance
+                    fib_level_used = fib_level
+        
+        if not in_zone:
+            return None
+        
+        # Determine direction from TDA
+        if tda_result and tda_result.trade_direction:
+            tda_direction = tda_result.trade_direction.value.upper()
+        else:
+            tda_direction = None
+        
+        # Fib direction
+        fib_direction = "BUY" if fib_levels.direction == FibDirection.BULLISH else "SELL"
+        
+        # CRITICAL: Ensure TDA and Fib directions align
+        # If they conflict, skip the trade (ambiguous setup)
+        if tda_direction and tda_direction != fib_direction:
+            self.logger.debug(
+                f"[TREND] TPU-LITE: Direction conflict TDA={tda_direction} vs Fib={fib_direction} - skipping"
+            )
+            return None
+        
+        direction = fib_direction  # Use Fib direction (guaranteed to match SL)
+        
+        # Calculate entry parameters
+        entry_price = current_price
+        stop_loss = fib_levels.stop_loss
+        r_value = fib_levels.r_value
+        
+        # VALIDATION: Ensure SL is on correct side
+        if direction == "BUY" and stop_loss >= entry_price:
+            self.logger.debug(f"[TREND] TPU-LITE: Invalid SL {stop_loss} >= entry {entry_price} for BUY - skipping")
+            return None
+        if direction == "SELL" and stop_loss <= entry_price:
+            self.logger.debug(f"[TREND] TPU-LITE: Invalid SL {stop_loss} <= entry {entry_price} for SELL - skipping")
+            return None
+        
+        # TPU-Lite confidence: 55-70% range
+        confidence = 0.55 + (1.0 - best_distance / tpu_lite_tolerance) * 0.15
+        confidence = min(0.70, max(0.55, confidence))
+        
+        # ML filter (3-zone)
+        ml_passed = True
+        ml_probability = 0.55  # Default for lite mode
+        ml_risk_multiplier = 0.5  # Lite mode uses reduced risk
+        ml_adjusted_risk = self._ml_base_risk * 0.5 if hasattr(self, '_ml_base_risk') else 0.375
+        
+        if self._ml_enabled and self.ml_filter is not None:
+            current_atr = self._calculate_atr(candles) if len(candles) >= 14 else 0.001
+            
+            ml_passed, ml_adjusted_risk, ml_prediction = self.ml_filter.evaluate_signal(
+                tda_result=tda_result,
+                fib_levels=fib_levels,
+                divergence_result=None,
+                pattern_result=None,
+                trade_direction=direction,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                current_atr=current_atr,
+                current_spread=market_data.spread if hasattr(market_data, 'spread') else 0,
+                timestamp=market_data.timestamp if hasattr(market_data, 'timestamp') else datetime.now(),
+                pair=pair,
+                tpu_confidence=confidence
+            )
+            
+            ml_probability = ml_prediction.probability_win
+            ml_risk_multiplier = ml_prediction.risk_multiplier
+            
+            if not ml_passed:
+                self.logger.debug(
+                    f"[TREND] TPU-LITE ML REJECTED: {pair} - P(win)={ml_probability:.1%}"
+                )
+                return None
+        
+        # Calculate position size (at reduced risk for lite mode)
+        pip_mult = 100 if "JPY" in pair else (10 if "XAU" in pair else 10000)
+        lot_result = self.risk_manager.calculate_position_size(
+            pair=pair,
+            stop_loss_pips=abs(entry_price - stop_loss) * pip_mult,
+            account_equity=account_state.equity,
+            free_margin=account_state.free_margin,
+            risk_percent=ml_adjusted_risk
+        )
+        
+        if not lot_result.is_valid:
+            return None
+        
+        reason = f"TPU-LITE: TDA {tda_result.alignment.value if tda_result else 'N/A'}, Fib {fib_level_used:.1%} zone"
+        
+        self.logger.info(
+            f"[TREND] TPU-LITE {direction}: {pair} @ {entry_price:.5f}"
+        )
+        self.logger.info(
+            f"  Fib {fib_level_used:.1%}, dist={best_distance:.1f} pips, conf={confidence:.1%}"
+        )
+        
+        return self._create_enhanced_signal(
+            pair=pair,
+            direction=direction,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            r_value=r_value,
+            lot_size=lot_result.lot_size,
+            confidence=confidence,
+            reason=reason,
+            ml_probability=ml_probability,
+            ml_risk_multiplier=ml_risk_multiplier
+        )
+
     def _create_enhanced_signal(
         self,
         pair: str,

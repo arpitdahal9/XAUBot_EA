@@ -50,6 +50,26 @@ class FibonacciLevels:
     entry_price: float
     stop_loss: float
     r_value: float  # Distance in price for 1R
+    
+    def get_level_price(self, level: float) -> float:
+        """Get price at a specific Fibonacci level (0.0 to 1.0)."""
+        level_map = {
+            0.0: self.level_0,
+            0.236: self.level_236,
+            0.382: self.level_382,
+            0.5: self.level_50,
+            0.618: self.level_618,
+            0.786: self.level_786,
+            0.886: self.level_886,
+            1.0: self.level_100,
+        }
+        if level in level_map:
+            return level_map[level]
+        # Interpolate for other levels
+        if self.direction == FibDirection.BULLISH:
+            return self.swing_high - (self.range_size * level)
+        else:
+            return self.swing_low + (self.range_size * level)
 
 
 @dataclass

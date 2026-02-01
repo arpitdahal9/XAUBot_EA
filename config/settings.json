@@ -76,24 +76,31 @@
   },
   
   "signal_quality": {
-    "_description": "FIX #4: Quality gates for trade selection",
-    "min_confidence": 0.75,
-    "use_sma_fallback": false
+    "_description": "Trade selection quality gates (v2 - OR gating)",
+    "min_confidence": 0.70,
+    "use_or_gating": true,
+    "use_tpu_lite": true,
+    "_comment_gating": "OR gating: TDA >= GOOD + Fib zone + (Divergence OR Pattern)",
+    "_comment_fib_levels": "Trend regime uses 0.618/0.786/0.886, reversal uses 0.886 only"
   },
   
   "_comment_ml_filter": "=== ML TRADE QUALITY FILTER ===",
   
   "ml_filter": {
-    "_description": "ML model decides which TPU setups to take and risk sizing",
+    "_description": "ML model with 3-Zone behavior for trade gating and risk sizing",
     "enabled": true,
     "model_path": "./models/trade_filter.pkl",
     "model_type": "xgboost",
     
-    "_comment_trade_gate": "Trade Gate - threshold optimized for expectancy",
-    "probability_threshold": 0.58,
-    "dead_zone": 0.02,
+    "_comment_3zone": "=== 3-ZONE BEHAVIOR ===",
+    "_zone_a": "Zone A (≥0.60): Take at normal risk (1.0x)",
+    "_zone_b": "Zone B (0.55-0.60): Take at reduced risk (0.5x)",
+    "_zone_c": "Zone C (<0.55): Reject trade",
+    "zone_a_threshold": 0.60,
+    "zone_b_threshold": 0.55,
+    "zone_b_risk_multiplier": 0.5,
     
-    "_comment_risk_scaling": "Sigmoid risk scaling with caps",
+    "_comment_risk": "Base risk settings",
     "base_risk_percent": 0.75,
     "min_risk_multiplier": 0.5,
     "max_risk_multiplier": 1.5,
