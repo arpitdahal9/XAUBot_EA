@@ -1,0 +1,97 @@
+================================================================================
+                        TRADING BOT - QUICK START GUIDE
+================================================================================
+
+STEP 1: OPEN POWERSHELL AND ACTIVATE
+--------------------------------------
+    cd C:\Users\Comp\GoldEA
+    .\venv\Scripts\activate
+
+
+STEP 2: RUN A BACKTEST
+--------------------------------------
+    python test_my_strategy.py
+
+
+================================================================================
+                          HOW TO CHANGE SETTINGS
+================================================================================
+
+CHANGE THE CURRENCY PAIR:
+--------------------------------------
+1. Open: test_my_strategy.py
+2. Find: PAIR = "EUR/USD"
+3. Change to: PAIR = "GBP/USD"  (or any pair you want)
+4. Save and run: python test_my_strategy.py
+
+Supported pairs:
+  - EUR/USD
+  - GBP/USD  
+  - USD/JPY
+  - AUD/USD
+  - USD/CAD
+
+
+CHANGE THE TIMEFRAME:
+--------------------------------------
+1. Open: test_my_strategy.py
+2. Find: TIMEFRAME = "1h"
+3. Change to one of:
+   - "15m"  (15 minutes)
+   - "1h"   (1 hour)
+   - "4h"   (4 hours)
+   - "1d"   (1 day)
+4. Save and run: python test_my_strategy.py
+
+
+CHANGE THE DATE RANGE:
+--------------------------------------
+1. Open: test_my_strategy.py
+2. Find: CANDLES = 5000
+3. Change the number:
+   - 5000   = ~6 months (1h timeframe)
+   - 10000  = ~1 year (1h timeframe)
+   - 50000  = ~5 years (1h timeframe)
+4. Save and run: python test_my_strategy.py
+
+
+================================================================================
+                           UNDERSTANDING RESULTS
+================================================================================
+
+GOOD RESULTS (Strategy might work):
+  - Profit Factor: > 1.5
+  - Win Rate: > 50%
+  - Max Drawdown: < 20%
+
+BAD RESULTS (Don't use this strategy):
+  - Profit Factor: < 1.0
+  - Win Rate: < 40%
+  - Max Drawdown: > 30%
+
+
+================================================================================
+                              RUN THE BOT
+================================================================================
+
+DRY RUN (Safe - No Real Money):
+    python main.py
+
+Commands in the bot:
+  - status     = Check balance
+  - analyze    = Find signals
+  - grid       = Set up grid trading
+  - positions  = View open trades
+  - quit       = Exit
+
+
+================================================================================
+                             NEED HELP?
+================================================================================
+
+Full documentation: docs\SOP_USER_GUIDE.md
+Trade history:      backtest_trades.csv (open in Excel)
+Logs:               logs\trading_bot.log
+
+
+================================================================================

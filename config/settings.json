@@ -1,0 +1,214 @@
+{
+  "broker": {
+    "name": "IC Markets Australia",
+    "account_type": "Standard",
+    "max_leverage": 30,
+    "base_currency": "USD",
+    "api_endpoint": "https://api.icmarkets.com",
+    "demo_endpoint": "https://demo-api.icmarkets.com"
+  },
+  "trading": {
+    "pairs": ["EUR/USD", "USD/JPY", "GBP/USD", "AUD/USD", "USD/CAD"],
+    "gold_pairs": ["XAU/USD"],
+    "trading_mode": "MANUAL_TRIGGER",
+    "min_lot_size": 0.01,
+    "max_lot_size": 0.10,
+    "default_timeframe": "15m"
+  },
+  "grid_strategy": {
+    "enabled": true,
+    "grid_lines": 15,
+    "profit_per_grid_pips": 15,
+    "stop_loss_pips": 30,
+    "upper_limit": 0,
+    "lower_limit": 0
+  },
+  "trend_strategy": {
+    "enabled": true,
+    "sma_period_short": 9,
+    "sma_period_long": 20,
+    "timeframe": "15m",
+    "take_profit_pips": 75,
+    "stop_loss_pips": 50,
+    "trailing_stop_trigger_pips": 30,
+    "trailing_stop_offset_pips": 10
+  },
+  
+  "_comment_tpu_strategy": "=== ENHANCED TPU STRATEGY (Arpit Dahal) ===",
+  
+  "tda": {
+    "_description": "Top-Down Analysis - Multi-timeframe bias alignment",
+    "enabled": true,
+    "timeframes": ["W", "D", "H4", "H1"],
+    "require_alignment": true,
+    "min_alignment_quality": "GOOD",
+    "bias_confirmation_candles": 3
+  },
+  
+  "fibonacci": {
+    "_description": "Fibonacci entry at 88.6% retracement",
+    "enabled": true,
+    "entry_at_level": 0.886,
+    "tp1_at_level": 0.382,
+    "tp2_at_level": 0.618,
+    "tp3_at_level": 1.0,
+    "lookback_candles": 20,
+    "proximity_tolerance_pips": 20
+  },
+  
+  "divergence": {
+    "_description": "RSI divergence confirmation",
+    "enabled": true,
+    "indicator": "RSI",
+    "rsi_period": 14,
+    "lookback_candles": 20,
+    "require_confirmation": false,
+    "min_strength": "MODERATE"
+  },
+  
+  "patterns": {
+    "_description": "Double Top/Bottom pattern recognition",
+    "enabled": true,
+    "double_top_bottom": true,
+    "head_and_shoulders": true,
+    "tolerance_pips": 15,
+    "require_pattern": false
+  },
+  
+  "signal_quality": {
+    "_description": "FIX #4: Quality gates for trade selection",
+    "min_confidence": 0.75,
+    "use_sma_fallback": false
+  },
+  
+  "_comment_ml_filter": "=== ML TRADE QUALITY FILTER ===",
+  
+  "ml_filter": {
+    "_description": "ML model decides which TPU setups to take and risk sizing",
+    "enabled": true,
+    "model_path": "./models/trade_filter.pkl",
+    "model_type": "xgboost",
+    
+    "_comment_trade_gate": "Trade Gate - minimum P(win) to execute",
+    "probability_threshold": 0.58,
+    
+    "_comment_risk_scaling": "Dynamic Risk Scaling based on P(win)",
+    "base_risk_percent": 0.75,
+    "min_risk_multiplier": 0.5,
+    "max_risk_multiplier": 1.5,
+    
+    "_comment_training": "Walk-Forward Training Parameters",
+    "train_window_months": 24,
+    "test_window_months": 6,
+    "embargo_hours": 24,
+    "min_train_samples": 50,
+    
+    "_comment_calibration": "Calibration Requirements",
+    "max_calibration_error": 0.10,
+    "min_auc": 0.55
+  },
+  
+  "_comment_news_filter": "=== NEWS FILTER (Backtest Only) ===",
+  
+  "news_filter": {
+    "_description": "Skip trades around major news in backtests ONLY",
+    "enabled_in_backtest": true,
+    "avoidance_minutes": 30,
+    "events": ["CPI", "NFP", "FOMC"],
+    "custom_calendar_path": "./data/news_calendar.csv"
+  },
+  "risk_management": {
+    "account_balance": 10000,
+    
+    "_comment_position_sizing": "=== POSITION SIZING (Section 1) ===",
+    "risk_percent_per_trade": 0.75,
+    "risk_percent_min": 0.5,
+    "risk_percent_max": 1.0,
+    "margin_safety_threshold": 30,
+    
+    "_comment_partial_exits": "=== PARTIAL EXITS - Model A (Section 2) ===",
+    "partial_exits": {
+      "enabled": true,
+      "tp1_r_multiple": 2.0,
+      "tp1_close_percent": 50,
+      "tp2_r_multiple": 3.0,
+      "tp2_close_percent": 30,
+      "runner_percent": 20
+    },
+    
+    "_comment_stop_loss": "=== STOP LOSS & BREAK-EVEN (Section 3) ===",
+    "initial_stop_r": 1.0,
+    "breakeven_trigger_r": 1.2,
+    "breakeven_offset_r": 0.1,
+    "post_tp1_stop_r": 0.2,
+    
+    "_comment_trailing": "=== RUNNER TRAILING (Section 4) ===",
+    "trailing": {
+      "enabled": true,
+      "atr_multiplier_forex": 1.8,
+      "atr_multiplier_gold": 2.2,
+      "atr_period": 14,
+      "runner_target_min_r": 6.0,
+      "runner_target_max_r": 10.0
+    },
+    
+    "_comment_portfolio": "=== PORTFOLIO LIMITS (Section 5) ===",
+    "max_total_risk_percent": 2.0,
+    "max_concurrent_trades": 2,
+    "avoid_correlated_trades": true,
+    "correlation_groups": {
+      "USD_LONG": ["EUR/USD_SELL", "GBP/USD_SELL", "AUD/USD_SELL"],
+      "USD_SHORT": ["EUR/USD_BUY", "GBP/USD_BUY", "AUD/USD_BUY"],
+      "JPY_LONG": ["USD/JPY_BUY"],
+      "JPY_SHORT": ["USD/JPY_SELL"]
+    },
+    
+    "_comment_drawdown": "=== DRAWDOWN PROTECTION (Section 6) ===",
+    "daily_loss_limit_r": 2.0,
+    "weekly_loss_limit_r": 6.0,
+    "daily_loss_limit_usd": 50,
+    "max_drawdown_percent": 10,
+    
+    "_comment_filters": "=== SPREAD & VOLATILITY FILTERS (Section 7) ===",
+    "spread_filter": {
+      "enabled": true,
+      "max_spread_multiplier": 1.8,
+      "spread_lookback_candles": 50
+    },
+    "volatility_filter": {
+      "enabled": true,
+      "atr_spike_multiplier": 2.5,
+      "atr_lookback_candles": 50
+    },
+    
+    "_comment_legacy": "=== LEGACY SETTINGS ===",
+    "max_spread_allowed": 3.0,
+    "min_stop_loss_pips": 20,
+    "min_take_profit_pips": 20,
+    "margin_buffer_percent": 20
+  },
+  "logging": {
+    "level": "INFO",
+    "output_dir": "./logs",
+    "output_file": "trading_bot.log",
+    "max_log_file_size_mb": 50,
+    "backup_log_count": 5,
+    "console_output": true,
+    "colored_output": true
+  },
+  "api": {
+    "timeout_seconds": 10,
+    "retry_max_attempts": 3,
+    "retry_backoff_multiplier": 2.0,
+    "health_check_interval_seconds": 30
+  },
+  "dashboard": {
+    "refresh_interval_seconds": 5,
+    "show_debug_panel": false
+  },
+  "dry_run": {
+    "enabled": true,
+    "simulated_spread_pips": 1.5,
+    "simulated_slippage_pips": 0.5
+  }
+}
