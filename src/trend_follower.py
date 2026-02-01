@@ -499,18 +499,57 @@ class TrendFollower:
                 result.reason = "TDA alignment WEAK - no trade"
                 return result
         
-        # ===== STEP 2: Fibonacci Retracement (Multi-Level Support) =====
+        # ===== STEP 2: Fibonacci Retracement (Trend-Pullback Mode) =====
         fib_levels = None
         fib_level_used = None
         if self._fib_enabled:
             fib_levels = self.fib_calculator.calculate_levels(candles, self._fib_lookback)
             
             if fib_levels:
-                # Determine if we're in trend or reversal regime based on TDA
-                is_trend_regime = tda_result and tda_result.alignment == AlignmentQuality.PERFECT
+                # UPGRADE 1: Detect Trend vs Range Regime
+                # Trend regime: PERFECT or GOOD TDA with clear direction
+                # Range regime: WEAK TDA or mixed signals
+                is_trend_regime = (
+                    tda_result and 
+                    tda_result.alignment in [AlignmentQuality.PERFECT, AlignmentQuality.GOOD] and
+                    tda_result.trade_direction and
+                    tda_result.trade_direction != TrendBias.NEUTRAL
+                )
                 
-                # Check multiple fib levels in trend regime, strict 88.6% in reversal
-                fib_levels_to_check = self._fib_trend_levels if is_trend_regime else [self._fib_reversal_level]
+                # Determine if Fib direction matches TDA direction (continuation) or opposes (reversal)
+                fib_direction = "BUY" if fib_levels.direction == FibDirection.BULLISH else "SELL"
+                tda_direction = None
+                if tda_result and tda_result.trade_direction:
+                    tda_direction = tda_result.trade_direction.value.upper()
+                
+                is_continuation = (
+                    is_trend_regime and 
+                    tda_direction and 
+                    fib_direction == tda_direction
+                )
+                is_reversal = (
+                    is_trend_regime and 
+                    tda_direction and 
+                    fib_direction != tda_direction
+                )
+                is_range_regime = not is_trend_regime
+                
+                # UPGRADE 1: Trend-Pullback Mode Logic
+                # Trend regime + continuation → 0.618/0.786 (pullback entries)
+                # Trend regime + reversal → 0.886 (reversal entries)
+                # Range regime → strict 0.886 (reversal only)
+                if is_continuation:
+                    # Continuation entries in trend: use shallower fibs
+                    fib_levels_to_check = [0.618, 0.786]
+                    regime_str = "TREND-CONTINUATION"
+                elif is_reversal or is_range_regime:
+                    # Reversal entries: strict 0.886
+                    fib_levels_to_check = [self._fib_reversal_level]
+                    regime_str = "REVERSAL" if is_reversal else "RANGE"
+                else:
+                    # Fallback: use trend levels if TDA is strong
+                    fib_levels_to_check = self._fib_trend_levels if is_trend_regime else [self._fib_reversal_level]
+                    regime_str = "TREND" if is_trend_regime else "RANGE"
                 
                 in_zone = False
                 best_distance = 999
@@ -527,14 +566,14 @@ class TrendFollower:
                 result.at_fib_entry = in_zone
                 result.fib_distance_pips = best_distance if in_zone else 999
                 
-                regime_str = "TREND" if is_trend_regime else "REVERSAL"
                 self.logger.debug(
                     f"[TREND] Fib ({regime_str}): {'IN ZONE' if in_zone else 'OUT'} "
-                    f"(levels={fib_levels_to_check}, best_dist={best_distance:.1f} pips)"
+                    f"(levels={fib_levels_to_check}, best_dist={best_distance:.1f} pips, "
+                    f"Fib={fib_direction}, TDA={tda_direction})"
                 )
                 
                 if not in_zone:
-                    result.reason = f"Price not at Fib entry zone (dist={best_distance:.1f} pips)"
+                    result.reason = f"Price not at Fib entry zone ({regime_str}, dist={best_distance:.1f} pips)"
                     return result
         
         # ===== STEP 3: Divergence Detection =====
@@ -891,21 +930,14 @@ class TrendFollower:
                     ml_probability = ml_prediction.probability_win
                     ml_risk_multiplier = ml_prediction.risk_multiplier
                     
-                    if not ml_passed:
-                        self.logger.info(
-                            f"[TREND] ML FILTER REJECTED: {pair} {enhanced.direction} - "
-                            f"P(win)={ml_probability:.1%} < {self._ml_probability_threshold:.1%}"
-                        )
-                        # Store ML results in enhanced for logging
-                        enhanced.ml_probability = ml_probability
-                        enhanced.ml_risk_multiplier = ml_risk_multiplier
-                        enhanced.ml_passed_filter = False
-                        # Don't generate signal - ML says skip
-                        return signals
+                    # UPGRADE 2: ML as Soft Filter - always allow trades, scale risk
+                    # Zone A (≥0.60): 1.0x, Zone B (0.55-0.60): 0.5x, Zone C (<0.55): 0.25x
+                    zone_name = "A" if ml_probability >= 0.60 else ("B" if ml_probability >= 0.55 else "C")
                     
                     self.logger.info(
-                        f"[TREND] ML FILTER PASSED: P(win)={ml_probability:.1%}, "
-                        f"Risk={ml_adjusted_risk:.2f}%"
+                        f"[TREND] ML SOFT FILTER: {pair} {enhanced.direction} - "
+                        f"P(win)={ml_probability:.1%} (Zone {zone_name}), "
+                        f"Risk={ml_adjusted_risk:.2f}% ({ml_risk_multiplier:.2f}x)"
                     )
                 
                 # ===== NEWS FILTER (Backtest only) =====
@@ -1107,11 +1139,12 @@ class TrendFollower:
             ml_probability = ml_prediction.probability_win
             ml_risk_multiplier = ml_prediction.risk_multiplier
             
-            if not ml_passed:
-                self.logger.debug(
-                    f"[TREND] TPU-LITE ML REJECTED: {pair} - P(win)={ml_probability:.1%}"
-                )
-                return None
+            # UPGRADE 2: ML Soft Filter - always allow trades, scale risk
+            zone_name = "A" if ml_probability >= 0.60 else ("B" if ml_probability >= 0.55 else "C")
+            self.logger.debug(
+                f"[TREND] TPU-LITE ML SOFT FILTER: {pair} - P(win)={ml_probability:.1%} (Zone {zone_name}), "
+                f"Risk={ml_adjusted_risk:.2f}% ({ml_risk_multiplier:.2f}x)"
+            )
         
         # Calculate position size (at reduced risk for lite mode)
         pip_mult = 100 if "JPY" in pair else (10 if "XAU" in pair else 10000)

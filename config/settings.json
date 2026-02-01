@@ -46,14 +46,15 @@
   },
   
   "fibonacci": {
-    "_description": "Fibonacci entry at 88.6% retracement",
+    "_description": "Fibonacci entry (UPGRADE 1: Trend-Pullback Mode)",
     "enabled": true,
     "entry_at_level": 0.886,
     "tp1_at_level": 0.382,
     "tp2_at_level": 0.618,
     "tp3_at_level": 1.0,
     "lookback_candles": 20,
-    "proximity_tolerance_pips": 20
+    "proximity_tolerance_pips": 20,
+    "_comment_trend_pullback": "UPGRADE 1: Trend regime uses 0.618/0.786 (continuation), Range regime uses 0.886 (reversal)"
   },
   
   "divergence": {
@@ -87,18 +88,20 @@
   "_comment_ml_filter": "=== ML TRADE QUALITY FILTER ===",
   
   "ml_filter": {
-    "_description": "ML model with 3-Zone behavior for trade gating and risk sizing",
+    "_description": "ML model with 3-Zone SOFT FILTER (UPGRADE 2) - ranks trades, scales risk, no rejections",
     "enabled": true,
     "model_path": "./models/trade_filter.pkl",
     "model_type": "xgboost",
     
-    "_comment_3zone": "=== 3-ZONE BEHAVIOR ===",
+    "_comment_3zone": "=== 3-ZONE SOFT FILTER (UPGRADE 2) ===",
     "_zone_a": "Zone A (≥0.60): Take at normal risk (1.0x)",
     "_zone_b": "Zone B (0.55-0.60): Take at reduced risk (0.5x)",
-    "_zone_c": "Zone C (<0.55): Reject trade",
+    "_zone_c": "Zone C (<0.55): Take at very small risk (0.25x) - NO REJECTION",
+    "_comment_soft_filter": "ML ranks trades and scales risk dynamically, doesn't reject everything near threshold",
     "zone_a_threshold": 0.60,
     "zone_b_threshold": 0.55,
     "zone_b_risk_multiplier": 0.5,
+    "zone_c_risk_multiplier": 0.25,
     
     "_comment_risk": "Base risk settings",
     "base_risk_percent": 0.75,

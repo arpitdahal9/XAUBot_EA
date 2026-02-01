@@ -5,13 +5,13 @@ Predicts P(TP1 hit before SL) and uses it for:
 1. Trade gate: Only execute if P(win) >= threshold
 2. Risk scaling: Adjust position size based on probability
 
-NEW: 3-Zone Behavior:
-- Zone A (≥0.60): Take trade at normal risk
+UPGRADE 2: ML as Soft Filter (not brick wall)
+- Zone A (≥0.60): Take trade at normal risk (1.0x)
 - Zone B (0.55-0.60): Take trade at 0.5x risk (reduced size)
-- Zone C (<0.55): Reject trade
+- Zone C (<0.55): Take trade at 0.25x risk (very small) - NO REJECTION
 
 Features:
-- 3-zone risk scaling (clearer than sigmoid)
+- 3-zone risk scaling (soft filter, ranks trades)
 - Auto-disable on model quality failure
 - Calibrated probability thresholds
 """
@@ -41,13 +41,14 @@ class MLPrediction:
 
 class MLTradeFilter:
     """
-    ML-based trade quality filter.
+    ML-based trade quality filter (UPGRADE 2: Soft Filter).
     
     3-Zone Behavior:
     - Zone A (p >= zone_a_threshold): Take at normal risk (1.0x)
     - Zone B (zone_b_threshold <= p < zone_a_threshold): Take at reduced risk (0.5x)
-    - Zone C (p < zone_b_threshold): Reject trade
+    - Zone C (p < zone_b_threshold): Take at very small risk (0.25x) - NO REJECTION
     
+    ML ranks trades and scales risk dynamically, doesn't reject everything near threshold.
     Auto-disable if model fails quality checks.
     """
     
@@ -55,6 +56,7 @@ class MLTradeFilter:
     ZONE_A_THRESHOLD = 0.60  # Normal risk zone
     ZONE_B_THRESHOLD = 0.55  # Reduced risk zone
     ZONE_B_RISK_MULT = 0.5   # Risk multiplier for Zone B
+    ZONE_C_RISK_MULT = 0.25  # Risk multiplier for Zone C (soft filter - no rejection)
     
     def __init__(
         self,
@@ -171,13 +173,15 @@ class MLTradeFilter:
     
     def _apply_3zone_logic(self, p_win: float) -> Tuple[bool, float, str]:
         """
-        Apply 3-Zone trading logic.
+        Apply 3-Zone trading logic (UPGRADE 2: Soft Filter).
         
         Returns: (should_trade, risk_multiplier, zone_name)
         
         Zone A (p >= 0.60): Take at normal risk (1.0x)
         Zone B (0.55 <= p < 0.60): Take at reduced risk (0.5x)
-        Zone C (p < 0.55): Reject trade
+        Zone C (p < 0.55): Take at very small risk (0.25x) - NO REJECTION
+        
+        ML now ranks and scales risk, doesn't reject trades near threshold.
         """
         if p_win >= self.zone_a_threshold:
             # Zone A: High confidence - take at normal risk
@@ -186,8 +190,8 @@ class MLTradeFilter:
             # Zone B: Medium confidence - take at reduced risk
             return True, self.ZONE_B_RISK_MULT, "B"
         else:
-            # Zone C: Low confidence - reject
-            return False, 0.0, "C"
+            # Zone C: Low confidence - take at very small risk (soft filter, not brick wall)
+            return True, self.ZONE_C_RISK_MULT, "C"
     
     def _calculate_risk_multiplier(self, p_win: float) -> float:
         """
